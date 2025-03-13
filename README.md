@@ -1,7 +1,7 @@
 # CirGPS_simple
 ## Few-shot Learning on AMS Circuits and Its Application to Parasitic Capacitance Prediction
 Note: 
-* This is a simple version of CircuitGPS.
+* This is a simple version of CirGPS.
 * Dataset can be found at [Google Drive](https://drive.google.com/drive/folders/1sBQEXEFYQzav43KghIh1pybnusiJLotS?usp=drive_link)
 
 ![](imgs/fig-gps.png)
