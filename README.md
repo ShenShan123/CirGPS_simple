@@ -1,4 +1,4 @@
-# CircuitGPS_simple
+# CirGPS_simple
 ## Few-shot Learning on AMS Circuits and Its Application to Parasitic Capacitance Prediction
 Note: 
 * This is a simple version of CircuitGPS.
@@ -14,7 +14,7 @@ The proposed method contains five steps:
 3. position encoding, 
 4. model pre-training/fine-tuning. 
 
-CircuitGPS is built on the top of [GraphGPS](https://github.com/rampasek/GraphGPS.git), which is
+CirGPS is built on the top of [GraphGPS](https://github.com/rampasek/GraphGPS.git), which is
 using [PyG](https://www.pyg.org/) and [GraphGym from PyG2](https://pytorch-geometric.readthedocs.io/en/2.0.0/notes/graphgym.html).
 Specifically *PyG v2.2* is required.
 To use all features backed up by GraphGPS, please go to another [repository](https://github.com/ShenShan123/CirGPS.git).
