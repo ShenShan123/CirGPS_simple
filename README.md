@@ -22,23 +22,18 @@ To use all features backed up by GraphGPS, please go to another [repository](htt
 ## Instructions
 
 ### Python environment setup with Conda
-These codes are tested on our platform with pytorch=1.13.1, cuda=11.7.
+In this simple version of cirgps, we employed `LinkNeighborLoader`, please see the [pyg doc](https://pytorch-geometric.readthedocs.io/en/2.5.1/modules/loader.html#torch_geometric.loader.LinkNeighborLoader) for more details.
+These codes are tested on our platform with 
+- torch==2.1.0+cu118
+- torch-cluster==1.6.3
+- torch-geometric==2.6.1
+- torch-scatter==2.1.2
+- torch-sparse==0.6.18
+- torch-spline-conv==1.2.2
 
-Firstly, you need to install Git Large File Storage [LFS](https://docs.github.com/en/repositories/working-with-files/managing-large-files/installing-git-large-file-storage).
-
-Then, you can directly use our conda config file.
-``` bash
-conda env create -f environment.yaml
-```
-If you enconter any problem, try pip instead,
-```bash
-conda create -n cirgps
-pip install -r requirements.txt
-```
-or use the oringal environment of [GraphGPS](https://github.com/rampasek/GraphGPS.git).
 
 ### Running an experiment with CirGPS
-In the 'configs/sram' floder, the files starting with 'sram-' are for the link-prediction task, those starting with 'reg-' are for the edge-regression task.
+run the `main.py` for training & evaluation
 
 ```bash
 conda activate cirgps
