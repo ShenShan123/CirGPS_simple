@@ -18,6 +18,10 @@ from tqdm import tqdm
 from model import GraphHead
 from sampling_and_pe import dataset_sampling_and_pe_calculation
 
+NET = 0
+DEV = 1
+PIN = 2
+
 class Logger (object):
     """ 
     Logger for printing message during training and evaluation. 
@@ -143,10 +147,10 @@ def eval_epoch(loader, batched_dspd, model, device,
         _pred = pred_score.detach().to('cpu', non_blocking=True)
         logger.update_stats(true=_true,
                             pred=_pred,
-                            batch_size=_true.squeeze().size(0),
+                            batch_size=_true.size(0),
                             loss=loss.detach().cpu().item(),
                             )
-    logger.write_epoch(split)
+    return logger.write_epoch(split)
 
 def train(args, model, optimizier, 
           train_loader, val_loader, test_loaders, 
@@ -167,6 +171,8 @@ def train(args, model, optimizier,
         device (torch.device): The device to train the model on
     """
     optimizier.zero_grad()
+    
+    best_results = {'best_loss': 1e9, 'best_epoch': 0, 'test_results': []}
     
     for epoch in range(args.epochs):
         logger = Logger(task=args.task)
@@ -197,20 +203,34 @@ def train(args, model, optimizier,
 
         logger.write_epoch(split='train')
         ## ========== validation ========== ##
-        eval_epoch(
+        val_res = eval_epoch(
             val_loader, val_batched_dspd, 
             model, device, split='val', task=args.task
         )
+        
+        ## update the best results so far
+        if best_results['best_loss'] > val_res['loss']:
+            best_results['best_loss'] = val_res['loss']
+            best_results['best_epoch'] = epoch
+        
+        test_results = []
 
         ## ========== testing on other datasets ========== ##
         for test_name in test_batched_dspd_dict.keys():
-            eval_epoch(
+            res = eval_epoch(
                 test_loaders[test_name], test_batched_dspd_dict[test_name], 
                 model, device, split='test', task=args.task
             )
-NET = 0
-DEV = 1
-PIN = 2
+            test_results.append(res)
+
+        if best_results['best_epoch'] == epoch:
+            best_results['test_results'] = test_results
+
+        print("=====================================")
+        print(f"Best epoch: {best_results['best_epoch']} loss: {best_results['best_loss']}")
+        print(f"Test results: {[res for res in best_results['test_results']]}")
+        print("=====================================")
+
 
 def downstream_link_pred(args, dataset, device):
     """ downstream task training for link prediction
