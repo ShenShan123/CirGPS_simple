@@ -17,6 +17,7 @@ from tqdm import tqdm
 # from torch_geometric.loader import NeighborLoader, GraphSAINTRandomWalkSampler, GraphSAINTEdgeSampler, ShaDowKHopSampler
 from model import GraphHead
 from sampling_and_pe import dataset_sampling_and_pe_calculation
+from balanced_mse import GAILoss, BMCLoss, train_gmm
 
 NET = 0
 DEV = 1
@@ -88,61 +89,60 @@ class Logger (object):
         print(split, res)
         return res
 
-def compute_loss(pred, true, task):
+def compute_loss(args, pred, true, criterion):
     """Compute loss and prediction score. 
     This version only supports binary classification.
     Args:
+        args (argparse.Namespace): The arguments
         pred (torch.tensor): Unnormalized prediction
         true (torch.tensor): Groud truth label
-        task (str): The task type, 'classification' or 'regression'
+        criterion (torch.nn.Module): The loss function
     Returns: Loss, normalized prediction score
     """
-
+    assert criterion, "Loss function is not provided!"
     ## default manipulation for pred and true
     ## can be skipped if special loss computation is needed
     pred = pred.squeeze(-1) if pred.ndim > 1 else pred
     true = true.squeeze(-1) if true.ndim > 1 else true
 
-    if task == 'classification':
-        bce_loss = torch.nn.BCEWithLogitsLoss(reduction='mean')
-
-        ## multiclass
+    if args.task == 'classification':
+        ## multiclass task uses the negative log likelihood loss.
         if pred.ndim > 1 and true.ndim == 1:
             pred = F.log_softmax(pred, dim=-1)
             return F.nll_loss(pred, true), pred
         ## binary or multilabel
         else:
             true = true.float()
-            return bce_loss(pred, true), torch.sigmoid(pred)
+            return criterion(pred, true), torch.sigmoid(pred)
         
-    elif task == 'regression':
-        mse_loss = torch.nn.MSELoss(reduction='mean')
-        return mse_loss(pred, true), pred
+    elif args.task == 'regression':
+        # true = true.float()
+        return criterion(pred, true), pred
     
     else:
-        raise ValueError(f"Task type {task} not supported!")
+        raise ValueError(f"Task type {args.task} not supported!")
 
 @torch.no_grad()
-def eval_epoch(loader, batched_dspd, model, device, 
-               split='val', task='classification'):
+def eval_epoch(args, loader, batched_dspd, model, device, 
+               split='val', criterion=None):
     """ 
     evaluate the model on the validation or test set
     Args:
+        args (argparse.Namespace): The arguments
         loader (torch.utils.data.DataLoader): The data loader
         model (torch.nn.Module): The model
         device (torch.device): The device to run the model on
         split (str): The split name, 'val' or 'test'
-        task (str): The edge-level task type, 'classification' or 'regression'
     """
     model.eval()
     time_start = time.time()
-    logger = Logger(task=task)
+    logger = Logger(task=args.task)
 
     for i, batch in enumerate(tqdm(loader, desc="eval_"+split, leave=False)):
         ## copy dspd tensor to the batch
         batch.dspd = batched_dspd[i]
         pred, true = model(batch.to(device))
-        loss, pred_score = compute_loss(pred, true, task)
+        loss, pred_score = compute_loss(args, pred, true, criterion=criterion)
         _true = true.detach().to('cpu', non_blocking=True)
         _pred = pred_score.detach().to('cpu', non_blocking=True)
         logger.update_stats(true=_true,
@@ -152,7 +152,7 @@ def eval_epoch(loader, batched_dspd, model, device,
                             )
     return logger.write_epoch(split)
 
-def train(args, model, optimizier, 
+def train(args, model, optimizier, criterion,
           train_loader, val_loader, test_loaders, 
           train_batched_dspd, val_batched_dspd, 
           test_batched_dspd_dict, device):
@@ -162,6 +162,7 @@ def train(args, model, optimizier,
         args (argparse.Namespace): The arguments
         head_model (torch.nn.Module): The head model
         optimizier (torch.optim.Optimizer): The optimizer
+        criterion (torch.nn.Module): The loss function
         train_loader (torch.utils.data.DataLoader): The training data loader
         val_loader (torch.utils.data.DataLoader): The validation data loader  
         test_laders (list): A list of test data loaders
@@ -172,7 +173,10 @@ def train(args, model, optimizier,
     """
     optimizier.zero_grad()
     
-    best_results = {'best_loss': 1e9, 'best_epoch': 0, 'test_results': []}
+    best_results = {
+        'best_val_mse': 1e9, 'best_val_loss': 1e9, 
+        'best_epoch': 0, 'test_results': []
+    }
     
     for epoch in range(args.epochs):
         logger = Logger(task=args.task)
@@ -185,9 +189,7 @@ def train(args, model, optimizier,
             
             ## Get the prediction from the model
             y_pred, y = model(batch.to(device))
-            # print("y_pred", y_pred.squeeze()[:10])
-            # print("y_true", y.squeeze()[:10])
-            loss, pred = compute_loss(y_pred, y, args.task)
+            loss, pred = compute_loss(args, y_pred, y, criterion=criterion)
             _true = y.detach().to('cpu', non_blocking=True)
             _pred = y_pred.detach().to('cpu', non_blocking=True)
 
@@ -204,13 +206,14 @@ def train(args, model, optimizier,
         logger.write_epoch(split='train')
         ## ========== validation ========== ##
         val_res = eval_epoch(
-            val_loader, val_batched_dspd, 
-            model, device, split='val', task=args.task
+            args, val_loader, val_batched_dspd, 
+            model, device, split='val', criterion=criterion
         )
-        
+
         ## update the best results so far
-        if best_results['best_loss'] > val_res['loss']:
-            best_results['best_loss'] = val_res['loss']
+        if best_results['best_val_mse'] > val_res['mse']:
+            best_results['best_val_mse'] = val_res['mse']
+            best_results['best_val_loss'] = val_res['loss']
             best_results['best_epoch'] = epoch
         
         test_results = []
@@ -218,18 +221,20 @@ def train(args, model, optimizier,
         ## ========== testing on other datasets ========== ##
         for test_name in test_batched_dspd_dict.keys():
             res = eval_epoch(
-                test_loaders[test_name], test_batched_dspd_dict[test_name], 
-                model, device, split='test', task=args.task
+                args, test_loaders[test_name], 
+                test_batched_dspd_dict[test_name], 
+                model, device, split='test', 
+                criterion=criterion
             )
             test_results.append(res)
 
         if best_results['best_epoch'] == epoch:
             best_results['test_results'] = test_results
 
-        print("=====================================")
-        print(f"Best epoch: {best_results['best_epoch']} loss: {best_results['best_loss']}")
-        print(f"Test results: {[res for res in best_results['test_results']]}")
-        print("=====================================")
+        print( "=====================================")
+        print(f" Best epoch: {best_results['best_epoch']}, mse: {best_results['best_val_mse']}, loss: {best_results['best_val_loss']}")
+        print(f" Test results: {[res for res in best_results['test_results']]}")
+        print( "=====================================")
 
 
 def downstream_link_pred(args, dataset, device):
@@ -241,15 +246,6 @@ def downstream_link_pred(args, dataset, device):
         all_node_embeds (torch.tensor): The node embeddings come from the contrastive learning
         device (torch.device): The device to train the model on
     """
-    if args.task == 'regression':
-        ## normalize the circuit statistics
-        dataset.norm_nfeat([NET, DEV])
-    ## Subgraph sampling for each dataset graph & PE calculation
-    (
-        train_loader, val_loader, test_loaders,
-        train_dspd_list, valid_dspd_list, test_dspd_dict,
-    ) = dataset_sampling_and_pe_calculation(args, dataset)
-    
     model = GraphHead(
         args.hid_dim, 1, num_layers=args.num_gnn_layers, 
         num_head_layers=args.num_head_layers, 
@@ -258,19 +254,40 @@ def downstream_link_pred(args, dataset, device):
         task=args.task, use_stats=args.use_stats, 
     )
 
+    if args.task == 'regression':
+        ## normalize the circuit statistics
+        dataset.norm_nfeat([NET, DEV])
+    ## Subgraph sampling for each dataset graph & PE calculation
+    (
+        train_loader, val_loader, test_loaders,
+        train_dspd_list, valid_dspd_list, test_dspd_dict,
+    ) = dataset_sampling_and_pe_calculation(args, dataset)
+
     model = model.to(device)
     
     optimizier = torch.optim.Adam(model.parameters(),lr=args.lr)
-    
+
+    if args.task == 'classification':
+        criterion = torch.nn.BCEWithLogitsLoss(reduction='mean')
+    elif args.loss == 'gai':
+        gmm_path = train_gmm(dataset[0])
+        criterion = GAILoss(init_noise_sigma=args.noise_sigma, gmm=gmm_path, device=device)
+        # optimizier.add_param_group({'params': criterion.noise_sigma, 'name': 'noise_sigma'})
+    elif args.loss == 'bmc':
+        criterion = BMCLoss(init_noise_sigma=args.noise_sigma, device=device)
+        # optimizier.add_param_group({'params': criterion.noise_sigma, 'name': 'noise_sigma'})
+    elif args.loss == 'mse':
+        criterion = torch.nn.MSELoss(reduction='mean')
+    else:
+        raise ValueError(f"Loss func {args.loss} not supported!")
+
     start = time.time()
 
     ## Start training, go go go!
-    train(args, model, optimizier, 
+    train(args, model, optimizier, criterion,
           train_loader, val_loader, test_loaders, 
-          train_dspd_list, 
-          valid_dspd_list, 
-          test_dspd_dict,
-          device)
+          train_dspd_list, valid_dspd_list, 
+          test_dspd_dict, device)
     
     elapsed = time.time() - start
     timestr = time.strftime('%H:%M:%S', time.gmtime(elapsed))

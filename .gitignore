@@ -6,6 +6,7 @@ datasets/
 
 # Ignore all .pt files
 *.pt
+*.pkl
 
 # Ignore Python-specific files
 __pycache__/
