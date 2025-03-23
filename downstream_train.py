@@ -246,13 +246,7 @@ def downstream_link_pred(args, dataset, device):
         all_node_embeds (torch.tensor): The node embeddings come from the contrastive learning
         device (torch.device): The device to train the model on
     """
-    model = GraphHead(
-        args.hid_dim, 1, num_layers=args.num_gnn_layers, 
-        num_head_layers=args.num_head_layers, 
-        use_bn=args.use_bn, drop_out=args.dropout, activation=args.act_fn, 
-        src_dst_agg=args.src_dst_agg, use_pe=args.use_pe, max_dist=args.max_dist,
-        task=args.task, use_stats=args.use_stats, 
-    )
+    model = GraphHead(args)
 
     if args.task == 'regression':
         ## normalize the circuit statistics
@@ -269,8 +263,10 @@ def downstream_link_pred(args, dataset, device):
 
     if args.task == 'classification':
         criterion = torch.nn.BCEWithLogitsLoss(reduction='mean')
+        print(f"Task is {args.task}, using BCEWithLogitsLoss")
+
     elif args.loss == 'gai':
-        gmm_path = train_gmm(dataset[0])
+        gmm_path = train_gmm(dataset)
         criterion = GAILoss(init_noise_sigma=args.noise_sigma, gmm=gmm_path, device=device)
         # optimizier.add_param_group({'params': criterion.noise_sigma, 'name': 'noise_sigma'})
     elif args.loss == 'bmc':

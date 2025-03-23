@@ -8,5 +8,7 @@ datasets/
 *.pt
 *.pkl
 
+*.png
+
 # Ignore Python-specific files
 __pycache__/

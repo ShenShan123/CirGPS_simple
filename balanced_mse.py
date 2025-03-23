@@ -6,27 +6,92 @@ from sklearn.mixture import GaussianMixture
 import time
 from tqdm import tqdm
 
-def train_gmm(train_graph):
-    start = time.time()
-    all_labels = train_graph.edge_label
-    # print('train_loader', train_loader)
-    # assert 0
-    # for batch in train_loader:
-    # for i, batch in enumerate(tqdm(train_loader)):
-        # print("batch", batch)
-        # all_labels.append(batch.edge_label)
+import torch
+import matplotlib.pyplot as plt
+import numpy as np
+
+def kl_divergence(p: torch.Tensor, q: torch.Tensor, bins: int = 10, 
+                  epsilon: float = 1e-8, save_path: str = "logs/histograms.png") -> float:
+    """
+    Compute KL divergence and plot histograms of the distributions.
     
-    print('all_labels', all_labels)
+    Args:
+        p (torch.Tensor): True distribution [N, 1]
+        q (torch.Tensor): Pred distribution [N, 1]
+        bins (int): Number of histogram bins
+        epsilon (float): Smoothing factor
+        save_path (str): Path to save histogram plot
+        
+    Returns:
+        float: KL divergence value
+    """
+    # Convert to 1D numpy arrays for plotting
+    p_np = p.flatten().cpu().numpy()
+    q_np = q.flatten().cpu().numpy()
+    
+    # Create figure with subplots
+    plt.figure(figsize=(12, 6))
+    
+    # Plot first distribution
+    plt.subplot(1, 2, 1)
+    plt.hist(p_np, bins=bins, alpha=0.5, density=True, label='Distribution P')
+    plt.title("Distribution P")
+    plt.xlabel("Value")
+    plt.ylabel("Density")
+    plt.legend()
+    
+    # Plot second distribution
+    plt.subplot(1, 2, 2)
+    plt.hist(q_np, bins=bins, alpha=0.5, density=True, label='Distribution Q', color='orange')
+    plt.title("Distribution Q")
+    plt.xlabel("Value")
+    plt.ylabel("Density")
+    plt.legend()
+    
+    # Save and close plot
+    plt.tight_layout()
+    plt.grid(True)
+    plt.savefig(save_path)
+    plt.close()
+
+    # Compute KL divergence (original calculation)
+    min_val = min(p.min(), q.min()).item()
+    max_val = max(p.max(), q.max()).item()
+    
+    p_counts = torch.histc(p, bins=bins, min=min_val, max=max_val) + epsilon
+    q_counts = torch.histc(q, bins=bins, min=min_val, max=max_val) + epsilon
+    
+    p_probs = p_counts / p_counts.sum()
+    q_probs = q_counts / q_counts.sum()
+    
+    kl = (p_probs * (torch.log(p_probs) - torch.log(q_probs))).sum().item()
+    
+    return kl
+
+def train_gmm(dataset):
+    start = time.time()
+    graph_idx = 0
+    train_labels = dataset[graph_idx].edge_label
+
+    for i in range(graph_idx+1, len(dataset.names)):
+        test_labels = dataset[i].edge_label
+        # Compute KL divergence and save histograms
+        kl_value = kl_divergence(
+            test_labels, train_labels, bins=20, 
+            save_path=f"logs/{dataset.names[i]}_distribution_comparison.png"
+        )
+        print(f"KL Divergence for {dataset.names[i]}: {kl_value:.4f}")
+
     print('Training labels curated')
     print('Fitting GMM...')
     gmm = GaussianMixture(n_components=8, random_state=0, verbose=2).fit(
-        all_labels.reshape(-1, 1).cpu().numpy())
+        train_labels.reshape(-1, 1).cpu().numpy())
     
     gmm_dict = {}
     gmm_dict['means'] = gmm.means_
     gmm_dict['weights'] = gmm.weights_
     gmm_dict['variances'] = gmm.covariances_
-    gmm_path = 'gmm.pkl'
+    gmm_path = 'tmp/gmm.pkl'
 
     joblib.dump(gmm_dict, gmm_path)
 

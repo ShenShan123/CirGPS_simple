@@ -63,7 +63,7 @@ def pe_encoding_for_graph(
         loader: The loader with 'batch_size' for mini-batch training
         batch_dspd_list: The DSPDs of batches coming from the loader.
     """
-    num_neighbors = -1
+    num_neighbors = 64
     path_exist = os.path.exists(processed_pe_path)
     
 
