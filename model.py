@@ -29,30 +29,45 @@ class GraphHead(nn.Module):
     """
     def __init__(self, args):
         super().__init__()
+        self.use_cl = args.sgrl
         self.use_pe = args.use_pe
         self.use_stats = args.use_stats
         hidden_dim = args.hid_dim
-        ## only use node&edge type encoders
         node_embed_dim = hidden_dim
+
+        if args.use_stats + self.use_pe + self.use_cl == 3:
+            assert hidden_dim % 4 == 0, \
+                "hidden_dim should be divided by 4 (4 types of encoders)"
+            node_embed_dim = hidden_dim // 4
         
         ## circuit statistics encoder + PE encoder + node&edge type encoders
-        if args.use_stats + self.use_pe == 2:
+        elif args.use_stats + self.use_pe + self.use_cl == 2:
+            assert hidden_dim % 3 == 0, \
+                "hidden_dim should be divided by 3 (3 types of encoders)"
             node_embed_dim = hidden_dim // 3
-            ## deal with hidden_dim not divisible by 3
-            c_embed_dim = hidden_dim - 2 * node_embed_dim
+
         ## circuit statistics/pe encoder + node&edge type encoders
-        elif self.use_stats + self.use_pe == 1:
+        elif self.use_stats + self.use_pe + self.use_cl == 1:
+            assert hidden_dim % 2 == 0, \
+                "hidden_dim should be divided by 2 (2 types of encoders)"
             node_embed_dim = hidden_dim // 2
-            c_embed_dim = hidden_dim - node_embed_dim
+
+        ## only use node&edge type encoders
+        else:
+            pass
+
+        ## Contrastive learning encoder
+        if self.use_cl:
+            self.cl_linear = nn.Linear(args.cl_hid_dim, node_embed_dim)
 
         ## Circuit Statistics encoder, producing matrix C
         if self.use_stats:
             ## add node_attr transform layer for net/device/pin nodes, by shan
-            self.net_attr_layers = nn.Linear(17, c_embed_dim, bias=True)
-            self.dev_attr_layers = nn.Linear(17, c_embed_dim, bias=True)
+            self.net_attr_layers = nn.Linear(17, node_embed_dim, bias=True)
+            self.dev_attr_layers = nn.Linear(17, node_embed_dim, bias=True)
             ## pin attributes are {0, 1, 2} for gate pin, source/drain pin, and base pin
-            self.pin_attr_layers = nn.Embedding(17, c_embed_dim)
-            self.c_embed_dim = c_embed_dim
+            self.pin_attr_layers = nn.Embedding(17, node_embed_dim)
+            self.c_embed_dim = node_embed_dim
 
 
         ## PE encoder, producing D_0 and D_1
@@ -137,11 +152,18 @@ class GraphHead(nn.Module):
 
     def forward(self, batch):
         ## Node type / Edge type encoding
-        z = self.node_encoder(batch.x[:, 0])
-        ze = self.edge_encoder(batch.edge_type)
+        x = self.node_encoder(batch.node_type)
+        xe = self.edge_encoder(batch.edge_type)
+
+        ## Contrastive learning encoder
+        if self.use_cl:
+            xcl = self.cl_linear(batch.x)
+            ## concatenate node embeddings and embeddings learned by SGRL
+            x = torch.cat((x, xcl), dim=1)
 
         ## DSPD encoding
         if self.use_pe:
+            ## DSPD embeddings, D_0 and D_1 in EQ.1
             dspd_emb = self.pe_encoder(batch.dspd)
             if dspd_emb.ndim == 3 and dspd_emb.size(1) == 2:
                 dspd_emb = torch.cat((dspd_emb[:, 0, :], dspd_emb[:, 1, :]), dim=1)
@@ -150,14 +172,14 @@ class GraphHead(nn.Module):
                     f"Dimension number of DSPD embedding is" + 
                     f" {dspd_emb.ndim}, size {dspd_emb.size()}")
             ## concatenate node embeddings and DSPD embeddings
-            z = torch.cat((z, dspd_emb), dim=1)
+            x = torch.cat((x, dspd_emb), dim=1)
 
         ## If we use circuit statistics encoder
         if self.use_stats:
-            net_node_mask = batch.x.squeeze() == NET
-            dev_node_mask = batch.x.squeeze() == DEV
-            pin_node_mask = batch.x.squeeze() == PIN
-
+            net_node_mask = batch.node_type == NET
+            dev_node_mask = batch.node_type == DEV
+            pin_node_mask = batch.node_type == PIN
+            ## circuit statistics embeddings (C in EQ.6)
             node_attr_emb = torch.zeros(
                 (batch.num_nodes, self.c_embed_dim), device=batch.x.device
             )
@@ -167,35 +189,35 @@ class GraphHead(nn.Module):
                 self.dev_attr_layers(batch.node_attr[dev_node_mask])
             node_attr_emb[pin_node_mask] = \
                 self.pin_attr_layers(batch.node_attr[pin_node_mask, 0].long())
-            ## concatenate node embeddings and circuit statistics embeddings
-            z = torch.cat((z, node_attr_emb), dim=1)
+            ## concatenate node embeddings and circuit statistics embeddings (C in EQ.6)
+            x = torch.cat((x, node_attr_emb), dim=1)
 
         for conv in self.layers:
             ## for models that also take edge_attr as input
             if self.model == 'gine' or self.model == 'resgatedgcn':
-                z = conv(z, batch.edge_index, edge_attr=ze)
+                x = conv(x, batch.edge_index, edge_attr=xe)
             else:
-                z = conv(z, batch.edge_index)
+                x = conv(x, batch.edge_index)
 
             if self.use_bn:
-                z = self.bn_node_x(z)
+                x = self.bn_node_x(x)
             
-            z = self.activation(z)
+            x = self.activation(x)
 
             if self.drop_out > 0.0:
-                z = F.dropout(z, p=self.drop_out, training=self.training)
+                x = F.dropout(x, p=self.drop_out, training=self.training)
 
         ## In head layers. If we use graph pooling, we need to call the pooling function here
         if self.src_dst_agg == 'pool':
-            graph_emb = self.pooling_fun(z, batch.batch)
+            graph_emb = self.pooling_fun(x, batch.batch)
         ## Otherwise, only 2 embeddings from the anchor nodes are used to final prediction.
         else:
             batch_size = batch.edge_label.size(0)
-            ## In the LinkNeighbor loader, the first batch_size nodes in z are source nodes and,
-            ## the second 'batch_size' nodes in z are destination nodes. 
+            ## In the LinkNeighbor loader, the first batch_size nodes in x are source nodes and,
+            ## the second 'batch_size' nodes in x are destination nodes. 
             ## Remaining nodes are their '1-hop', '2-hop', 'n-hop' neighbors.
-            src_emb = z[:batch_size, :]
-            dst_emb = z[batch_size:batch_size*2, :]
+            src_emb = x[:batch_size, :]
+            dst_emb = x[batch_size:batch_size*2, :]
             if self.src_dst_agg == 'concat':
                 graph_emb = torch.cat((src_emb, dst_emb), dim=1)
             else:

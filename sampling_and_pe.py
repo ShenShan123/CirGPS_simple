@@ -38,11 +38,11 @@ def get_double_spd(data, anchor_indices, max_dist):
             raise ValueError(f"Anchor node {anchor} not found in graph")
             
         # Get shortest paths using BFS
-        lengths = nx.single_source_shortest_path_length(G, anchor)
+        shortest_lengths = nx.single_source_shortest_path_length(G, anchor)
         
         # Fill distances for this anchor column
-        for node, dist in lengths.items():
-            distances[node, i] = dist
+        for node, dist in shortest_lengths.items():
+            distances[node, i] = dist if dist < max_dist else max_dist
     # print(distances)
     return distances
 
@@ -63,7 +63,7 @@ def pe_encoding_for_graph(
         loader: The loader with 'batch_size' for mini-batch training
         batch_dspd_list: The DSPDs of batches coming from the loader.
     """
-    num_neighbors = 64
+    num_neighbors = -1
     path_exist = os.path.exists(processed_pe_path)
     
 
@@ -108,6 +108,7 @@ def pe_encoding_for_graph(
     )
 
     dspd_per_subg = []
+    gid_per_subg = []
 
     ## Calculate the SPD for each batch
     for subgraph in tqdm(
@@ -122,6 +123,8 @@ def pe_encoding_for_graph(
                 anchor_indices=[0, 1], max_dist=args.max_dist,
             )
         )
+        assert dspd_per_subg[-1].size(0) == subgraph.num_nodes
+        gid_per_subg.append(subgraph.n_id)
         
     ## The actual loader used in mini-batch training
     loader = LinkNeighborLoader(
@@ -192,6 +195,7 @@ def dataset_sampling_and_pe_calculation(args, dataset):
     train_edge_label = train_graph.edge_label[train_ind]
     dspd_name = f'_h{args.num_hops}_seed{args.seed}_train.dspd'
 
+    ## Create the dataloaders and cached DSPD for training dataset
     train_loader, train_dspd_list = pe_encoding_for_graph(
         args, train_graph,
         train_edge_label_index, train_edge_label, 
@@ -202,6 +206,7 @@ def dataset_sampling_and_pe_calculation(args, dataset):
     val_edge_label = train_graph.edge_label[val_ind]
     dspd_name = f'_h{args.num_hops}_seed{args.seed}_val.dspd'
 
+    ## Create the dataloaders and cached DSPD for validation dataset
     val_loader, val_dspd_list = pe_encoding_for_graph(
         args, train_graph,
         val_edge_label_index, val_edge_label, 
@@ -217,6 +222,7 @@ def dataset_sampling_and_pe_calculation(args, dataset):
         graph_name = test_graph.name
         dspd_name = f'_h{args.num_hops}_seed{args.seed}_test.dspd'
 
+        ## Create the dataloaders and cached DSPD for each test dataset
         test_loaders[graph_name], test_dspd_dict[graph_name] = \
             pe_encoding_for_graph(
                 args, test_graph,

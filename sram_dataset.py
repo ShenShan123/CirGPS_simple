@@ -87,8 +87,12 @@ class SealSramDataset(InMemoryDataset):
         ## combine multiple graphs into data list
         self.data, self.slices = self.collate(data_list)
 
-    ## This is only used in regression task. Only device and net nodes have circuit statistics.
     def norm_nfeat(self, ntypes):
+        """
+        This is only used in regression task. Only `DEVICE` and `NET` nodes have circuit statistics.
+        Args:
+            ntypes (list): The node types {0, 1} to be normalized
+        """
         if self._data is None or self.slices is None:
             self.data, self.slices = self.collate(self._data_list)
             self._data_list = None
@@ -105,8 +109,24 @@ class SealSramDataset(InMemoryDataset):
         self._data.edge_label = torch.log10(self._data.edge_label * 1e21) / 6
         self._data.edge_label[self._data.edge_label < 0] = 0.0
         self._data.edge_label[self._data.edge_label > 1] = 1.0
-        print("self._data.edge_label", self._data.edge_label)
-        
+        self._data_list = None
+
+    def set_cl_embeds(self, embeds):
+        """
+        Set dataset attribute `x` as the embeddings learned by SGRL.
+        Args:
+            embeds (torch.Tensor): The embeddings [N, cl_hid_dim] learned by SGRL.
+        """
+        if self._data is None or self.slices is None:
+            self.data, self.slices = self.collate(self._data_list)
+            self._data_list = None
+
+        self._data.x = embeds
+        self._data_list = None
+        print("Setting CL embeddings to x...")
+        print('self._data', self._data)
+        # print('self.slices', self.slices)
+
     def sram_graph_load(self, name, raw_path):
         """
         In the loaded circuit graph, ground capacitance values are stored in "tar_node_y' attribute of the node. 
@@ -298,6 +318,7 @@ class SealSramDataset(InMemoryDataset):
         del aug_graph.tar_node_y
         del aug_graph.tar_edge_index
         del aug_graph.tar_edge_type
+        del aug_graph.tar_edge_y
 
         ## To use LinkNeighborLoader, the target links rename to edge_label_index
         ## target edge labels rename to edge_label
@@ -407,33 +428,31 @@ def collate_fn(dataList):
 
 def adaption_for_sgrl(dataset):
     """
-    It is only used for contrastive learning.
+    It is only used for contrastive learning (SGRL).
     """
-    data = dataset.data
-    slices = dataset.slices
-    # for data in self._data_list:
-    ## only preserve x, edge_index, links, labels
-    data.x = data.node_type.view(-1, 1)
-    slices['x'] = slices['node_type']
-    for key in data.keys():
-        if key in [
-            'tar_edge_y', 'tar_edge_index', 'tar_edge_type', 
-            'node_attr', 'node_type', 
-            'tar_node_y', 'tar_edge_offset', 'tar_edge_dist',
-        ]:
-            delattr(data, key)
-            del slices[key]
-    
     data_list = []
+
     for i, name in enumerate(dataset.names):
-        data_list.append(dataset[i])
+        single_graph = Data(
+            x=dataset[i].node_type, edge_index=dataset[i].edge_index, 
+            edge_attr=dataset[i].edge_type
+        )
+        data_list.append(single_graph)
+
+    # Create a big graph concate all graphs from the `data_list`
     batch = Batch.from_data_list(data_list)
-    del batch.edge_label_index, batch.edge_label
-    print("all g batch", batch)
-    print("all g batch.batch", batch.batch)
-    print("all g batch.ptr", batch.ptr)
-    # print("all g batch.edge_label_index", batch.edge_label_index)
-    # print("all g batch.edge_label", batch.edge_label)
+
+    ## Change the size of x
+    batch.x = batch.x.view(-1, 1)
+    ## Rename the `edge_attr` to `edge_type`
+    batch.edge_type = batch.edge_attr
+
+    ## remove the redundant attributes
+    del batch.edge_attr
+
+    print("attributes in big batch", batch)
+    print("batch.ptr", batch.ptr)
+
     return batch
 
 def performat_SramDataset(dataset_dir, name, 

@@ -91,7 +91,7 @@ def train_gmm(dataset):
     gmm_dict['means'] = gmm.means_
     gmm_dict['weights'] = gmm.weights_
     gmm_dict['variances'] = gmm.covariances_
-    gmm_path = 'tmp/gmm.pkl'
+    gmm_path = 'pkl/gmm/gmm.pkl'
 
     joblib.dump(gmm_dict, gmm_path)
 

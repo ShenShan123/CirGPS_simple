@@ -237,7 +237,7 @@ def train(args, model, optimizier, criterion,
         print( "=====================================")
 
 
-def downstream_link_pred(args, dataset, device):
+def downstream_train(args, dataset, device, cl_embeds=None):
     """ downstream task training for link prediction
     Args:
         args (argparse.Namespace): The arguments
@@ -247,6 +247,9 @@ def downstream_link_pred(args, dataset, device):
         device (torch.device): The device to train the model on
     """
     model = GraphHead(args)
+
+    if args.sgrl:
+        dataset.set_cl_embeds(cl_embeds)
 
     if args.task == 'regression':
         ## normalize the circuit statistics
