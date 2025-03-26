@@ -116,9 +116,10 @@ class GraphHead(nn.Module):
         self.src_dst_agg = args.src_dst_agg
 
         ## Add graph pooling layer
-        if args.src_dst_agg == 'pool':
-            # self.pooling_fun = pygnn.pool.global_mean_pool
+        if args.src_dst_agg == 'pooladd':
             self.pooling_fun = pygnn.pool.global_add_pool
+        elif args.src_dst_agg == 'poolmean':
+            self.pooling_fun = pygnn.pool.global_mean_pool
         
         ## The head configuration
         head_input_dim = hidden_dim * 2 if self.src_dst_agg == 'concat' else hidden_dim
@@ -136,6 +137,8 @@ class GraphHead(nn.Module):
         ## Batch normalization
         self.use_bn = args.use_bn
         self.bn_node_x = nn.BatchNorm1d(hidden_dim)
+        if self.use_bn and self.use_cl:
+            print("[Warning] Using batch normalization with contrastive learning may cause performance degradation.")
 
         ## activation setting
         if args.act_fn == 'relu':
@@ -208,7 +211,7 @@ class GraphHead(nn.Module):
                 x = F.dropout(x, p=self.drop_out, training=self.training)
 
         ## In head layers. If we use graph pooling, we need to call the pooling function here
-        if self.src_dst_agg == 'pool':
+        if self.src_dst_agg[:4] == 'pool':
             graph_emb = self.pooling_fun(x, batch.batch)
         ## Otherwise, only 2 embeddings from the anchor nodes are used to final prediction.
         else:
