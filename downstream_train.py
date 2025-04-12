@@ -114,9 +114,9 @@ def compute_loss(args, pred, true, criterion):
             return criterion(pred, true), torch.sigmoid(pred), true
         
     elif args.task == 'regression':
-        ## Size of `pred` must be [N,] for regression task
+        ## Size of `pred` must be [N, 1] for regression task
         assert pred.ndim == 1 or pred.size(1) == 1
-        pred = pred.squeeze()
+        pred = pred.view(-1, 1)
 
         assert (true.size(1) == 2), \
             "true label has two columns [continuous label, discrete label or label weights]!"
@@ -135,6 +135,7 @@ def compute_loss(args, pred, true, criterion):
         ## Size of `true[:, 0]` is [N,] for regression task, 
         ## ensuring same sizes of `pred` and `true`
         true = true[:, 0] if true.ndim == 2 else true
+        true = true.view(-1, 1)
         
         return criterion(pred, true), pred, true
     
