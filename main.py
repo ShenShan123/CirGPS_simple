@@ -20,15 +20,20 @@ if __name__ == "__main__":
     parser.add_argument('--momentum', type=float, default=0.99, help='EMA')
     parser.add_argument('--weight_decay', type=float, default=0., help='weight_decay')
     parser.add_argument('--cl_epochs', type=int, default=800, help='cl_epochs')
-    parser.add_argument('--cl_hid_dim', type=int, default=128, help='hidden_dim for contrastive learning')
-    # parser.add_argument('--num_layers', type=int, default=1, help='num_layers')
-    # parser.add_argument('--num_hop', type=int, default=1, help='num_hop')
+    parser.add_argument('--cl_hid_dim', type=int, default=144, help='hidden_dim for contrastive learning')
     # parser.add_argument('--trials', type=int, default=20, help='trials')
     # CirGPS arguments
     parser.add_argument("--task", type=str, default="classification", help="Task type. 'classification' or 'regression'.")
-    parser.add_argument("--loss", type=str, default='mse', help="The loss function. Could be 'mse', 'bmc', or 'gai'.")
+    parser.add_argument("--loss", type=str, default='mse', choices=['mse', 'gai', 'bmc', 'bni', 'lds'], help="The loss function. Could be 'mse', 'bmc', or 'gai'.")
+    # Balanced MSE setting for GAI implementation
     parser.add_argument("--noise_sigma", type=float, default=0.0001, help="The simga_noise of Balanced MSE (EQ 3.6).")
-    parser.add_argument("--use_pe", type=int, default=1, help="Positional encoding. Defualt: True.")
+    # LDS setting
+    parser.add_argument('--lds_kernel', type=str, default='gaussian',
+                    choices=['gaussian', 'triang', 'laplace'], help='LDS kernel type')
+    parser.add_argument('--lds_ks', type=int, default=9, help='LDS kernel size: should be odd number. 5 0r 9.')
+    parser.add_argument('--lds_sigma', type=float, default=0.02, help='LDS gaussian/laplace kernel sigma. 1 or 2.')
+
+    parser.add_argument("--use_pe", type=int, default=0, help="Positional encoding. Defualt: True.")
     parser.add_argument("--num_hops", type=int, default=4, help="Number of hops in subgraph sampling.")
     parser.add_argument("--max_dist", type=int, default=350, help="The max values in DSPD.")
     parser.add_argument("--num_workers", type=int, default=8, help="The number of workers in data loaders.")
@@ -36,15 +41,15 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=200, help="Training epochs.")
     parser.add_argument("--batch_size", type=int, default=128, help="The batch size.")
     parser.add_argument("--lr", type=float, default=0.0001, help="Learning rate.")
-    parser.add_argument("--model", type=str, default='clustergcn', help="The gnn model. Could be 'clustergcn', 'resgatedgcn', 'gat', 'gcn', 'sage', 'gine'.")
-    parser.add_argument("--num_gnn_layers", type=int, default=4, help="Number of GNN layers.")
+    parser.add_argument("--model", type=str, default='sage', help="The gnn model. Could be 'clustergcn', 'resgatedgcn', 'gat', 'gcn', 'sage', 'gine'.")
+    parser.add_argument("--num_gnn_layers", type=int, default=5, help="Number of GNN layers.")
     parser.add_argument("--num_head_layers", type=int, default=2, help="Number of head layers.")
     parser.add_argument("--hid_dim", type=int, default=144, help="Hidden layer dim.")
-    parser.add_argument('--dropout', type=float, default=0.3, help='dropout for neural networks.')
-    parser.add_argument('--use_bn', type=int, default=1, help='0 or 1. Batch norm for neural networks.')
-    parser.add_argument('--act_fn', default='relu', help='Activation function')
+    parser.add_argument('--dropout', type=float, default=0.1, help='Dropout for neural networks.')
+    parser.add_argument('--use_bn', type=int, default=0, help='0 or 1. Batch norm for neural networks.')
+    parser.add_argument('--act_fn', default='tanh', help='Activation function')
     parser.add_argument('--src_dst_agg', type=str, default='concat', help='The way to aggregate nodes. Can be `concat` or `add` or `pooladd` or `poolmean`.')
-    parser.add_argument('--use_stats', type=int, default=0, help='0 or 1. Circuit statistics features.')
+    parser.add_argument('--use_stats', type=int, default=1, help='0 or 1. Circuit statistics features.')
     args = parser.parse_args()
 
     # Syncronize all random seeds

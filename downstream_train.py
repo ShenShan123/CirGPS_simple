@@ -17,7 +17,7 @@ from tqdm import tqdm
 # from torch_geometric.loader import NeighborLoader, GraphSAINTRandomWalkSampler, GraphSAINTEdgeSampler, ShaDowKHopSampler
 from model import GraphHead
 from sampling_and_pe import dataset_sampling_and_pe_calculation
-from balanced_mse import GAILoss, BMCLoss, train_gmm
+from balanced_mse import GAILoss, BMCLoss, BNILoss, train_gmm, WeightedMSE, get_lds_weights
 
 NET = 0
 DEV = 1
@@ -100,10 +100,8 @@ def compute_loss(args, pred, true, criterion):
     Returns: Loss, normalized prediction score
     """
     assert criterion, "Loss function is not provided!"
-    ## default manipulation for pred and true
-    ## can be skipped if special loss computation is needed
-    pred = pred.squeeze(-1) if pred.ndim > 1 else pred
-    true = true.squeeze(-1) if true.ndim > 1 else true
+    assert pred.size(0) == true.size(0), \
+        "Prediction and true label size mismatch!"
 
     if args.task == 'classification':
         ## multiclass task uses the negative log likelihood loss.
@@ -113,11 +111,32 @@ def compute_loss(args, pred, true, criterion):
         ## binary or multilabel
         else:
             true = true.float()
-            return criterion(pred, true), torch.sigmoid(pred)
+            return criterion(pred, true), torch.sigmoid(pred), true
         
     elif args.task == 'regression':
-        # true = true.float()
-        return criterion(pred, true), pred
+        ## Size of `pred` must be [N,] for regression task
+        assert pred.ndim == 1 or pred.size(1) == 1
+        pred = pred.squeeze()
+
+        assert (true.size(1) == 2), \
+            "true label has two columns [continuous label, discrete label or label weights]!"
+        
+        ## for LDS loss, the second column of `true` is the weights
+        if args.loss == 'lds':
+            loss = criterion(
+                pred, 
+                true[:, 0].squeeze(), 
+                true[:, 1].squeeze() # the weight for each label
+            )
+            return loss, pred, true[:, 0].view(pred.size())
+
+        ## for other loss func, the second column of true is the discrete label,
+        ## which is not in use.
+        ## Size of `true[:, 0]` is [N,] for regression task, 
+        ## ensuring same sizes of `pred` and `true`
+        true = true[:, 0] if true.ndim == 2 else true
+        
+        return criterion(pred, true), pred, true
     
     else:
         raise ValueError(f"Task type {args.task} not supported!")
@@ -142,7 +161,7 @@ def eval_epoch(args, loader, batched_dspd, model, device,
         ## copy dspd tensor to the batch
         batch.dspd = batched_dspd[i]
         pred, true = model(batch.to(device))
-        loss, pred_score = compute_loss(args, pred, true, criterion=criterion)
+        loss, pred_score, true = compute_loss(args, pred, true, criterion=criterion)
         _true = true.detach().to('cpu', non_blocking=True)
         _pred = pred_score.detach().to('cpu', non_blocking=True)
         logger.update_stats(true=_true,
@@ -186,11 +205,11 @@ def train(args, model, optimizier, criterion,
             optimizier.zero_grad()
             ## copy dspd tensor to the data batch
             batch.dspd = train_batched_dspd[i]
-            
+
             ## Get the prediction from the model
             y_pred, y = model(batch.to(device))
-            loss, pred = compute_loss(args, y_pred, y, criterion=criterion)
-            _true = y.detach().to('cpu', non_blocking=True)
+            loss, pred, true = compute_loss(args, y_pred, y, criterion=criterion)
+            _true = true.detach().to('cpu', non_blocking=True)
             _pred = y_pred.detach().to('cpu', non_blocking=True)
 
             loss.backward()
@@ -254,15 +273,6 @@ def downstream_train(args, dataset, device, cl_embeds=None):
     if args.task == 'regression':
         ## normalize the circuit statistics
         dataset.norm_nfeat([NET, DEV])
-    ## Subgraph sampling for each dataset graph & PE calculation
-    (
-        train_loader, val_loader, test_loaders,
-        train_dspd_list, valid_dspd_list, test_dspd_dict,
-    ) = dataset_sampling_and_pe_calculation(args, dataset)
-
-    model = model.to(device)
-    
-    optimizier = torch.optim.Adam(model.parameters(),lr=args.lr)
 
     if args.task == 'classification':
         criterion = torch.nn.BCEWithLogitsLoss(reduction='mean')
@@ -275,13 +285,36 @@ def downstream_train(args, dataset, device, cl_embeds=None):
     elif args.loss == 'bmc':
         criterion = BMCLoss(init_noise_sigma=args.noise_sigma, device=device)
         # optimizier.add_param_group({'params': criterion.noise_sigma, 'name': 'noise_sigma'})
+    elif args.loss == 'bni':
+        _, bin_edges, bin_count = get_lds_weights(
+            dataset._data.edge_label[:, 1], 
+            args.lds_kernel, args.lds_ks, args.lds_sigma
+        )
+        criterion = BNILoss(args.noise_sigma, bin_edges, bin_count,  device=device)
+        # optimizier.add_param_group({'params': criterion.noise_sigma, 'name': 'noise_sigma'})
     elif args.loss == 'mse':
         criterion = torch.nn.MSELoss(reduction='mean')
+    elif args.loss == 'lds':
+        weights, _, _ = get_lds_weights(
+            dataset._data.edge_label[:, 1], 
+            args.lds_kernel, args.lds_ks, args.lds_sigma
+        )
+        dataset._data.edge_label[:, 1] = weights
+        criterion = WeightedMSE()
     else:
         raise ValueError(f"Loss func {args.loss} not supported!")
+    
+    ## Subgraph sampling for each dataset graph & PE calculation
+    (
+        train_loader, val_loader, test_loaders,
+        train_dspd_list, valid_dspd_list, test_dspd_dict,
+    ) = dataset_sampling_and_pe_calculation(args, dataset)
 
     start = time.time()
 
+    model = model.to(device)
+    optimizier = torch.optim.Adam(model.parameters(),lr=args.lr)
+    
     ## Start training, go go go!
     train(args, model, optimizier, criterion,
           train_loader, val_loader, test_loaders, 

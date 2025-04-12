@@ -10,6 +10,10 @@ import torch
 import matplotlib.pyplot as plt
 import numpy as np
 
+from scipy.ndimage import gaussian_filter1d
+from scipy.signal.windows import triang
+from scipy.ndimage import convolve1d
+
 def kl_divergence(p: torch.Tensor, q: torch.Tensor, bins: int = 10, 
                   epsilon: float = 1e-8, save_path: str = "logs/histograms.png") -> float:
     """
@@ -150,11 +154,11 @@ def bmc_loss(pred, target, noise_var):
 
 
 class BNILoss(_Loss):
-    def __init__(self, init_noise_sigma, bucket_centers, bucket_weights):
+    def __init__(self, init_noise_sigma, bucket_centers, bucket_weights, device):
         super(BNILoss, self).__init__()
-        self.noise_sigma = torch.nn.Parameter(torch.tensor(init_noise_sigma, device="cuda"))
-        self.bucket_centers = torch.tensor(bucket_centers).cuda()
-        self.bucket_weights = torch.tensor(bucket_weights).cuda()
+        self.noise_sigma = torch.nn.Parameter(torch.tensor(init_noise_sigma, device=device))
+        self.bucket_centers = bucket_centers.clone().detach().requires_grad_(False).to(device)
+        self.bucket_weights = bucket_weights.clone().detach().requires_grad_(False).to(device)
 
     def forward(self, pred, target):
         noise_var = self.noise_sigma ** 2
@@ -174,3 +178,62 @@ def bni_loss(pred, target, noise_var, bucket_centers, bucket_weights):
     loss = mse_term + balancing_term
     loss = loss * (2 * noise_var).detach()
     return loss.mean()
+
+class WeightedMSE(_Loss):
+    def __init__(self):
+        super(WeightedMSE, self).__init__()
+
+    def forward(self, inputs, targets, weights):
+        loss = (inputs - targets) ** 2
+        loss *= weights
+        loss = torch.mean(loss)
+        return loss
+
+def get_lds_kernel_window(kernel, ks, sigma):
+    assert kernel in ['gaussian', 'triang', 'laplace']
+    half_ks = (ks - 1) // 2
+    if kernel == 'gaussian':
+        base_kernel = [0.] * half_ks + [1.] + [0.] * half_ks
+        kernel_window = gaussian_filter1d(base_kernel, sigma=sigma) / max(gaussian_filter1d(base_kernel, sigma=sigma))
+    elif kernel == 'triang':
+        kernel_window = triang(ks)
+    else:
+        laplace = lambda x: np.exp(-abs(x) / sigma) / (2. * sigma)
+        kernel_window = list(map(laplace, np.arange(-half_ks, half_ks + 1))) / max(map(laplace, np.arange(-half_ks, half_ks + 1)))
+
+    return kernel_window
+
+def get_lds_weights(discrete_labels: torch.Tensor, lds_kernel: str, lds_ks: int, lds_sigma: float):
+    """ Calculate the weights for LDS loss based on the discrete labels.
+    Args:
+        discrete_labels (torch.Tensor): Discrete labels of the data.
+        lds_kernel (str): The kernel type for LDS. Options are 'gaussian', 'triang', 'laplace'.
+        lds_ks (int): The kernel size. Should be odd.
+        lds_sigma (float): The sigma value for the kernel.
+    Returns:
+        torch.Tensor: The scaled weights.
+        torch.Tensor: The empirical bin edges.
+        torch.Tensor: The empirical label distribution.
+    """
+    discrete_labels = discrete_labels.detach().cpu().long()
+
+    # Calculate empirical (original) label distribution: [Nb,]
+    emp_bins, emp_label_dist = discrete_labels.unique(return_counts=True)
+    
+
+    # lds_kernel_window: [ks,], here for example, we use gaussian, ks=5, sigma=2
+    lds_kernel_window = get_lds_kernel_window(lds_kernel, lds_ks, lds_sigma)
+    print(f'Using LDS: [{lds_kernel.upper()}] ({lds_ks}/{lds_sigma})')
+
+    # Calcualte smoothed label distribution: [Nb,]
+    smoothed_value = convolve1d(
+        emp_label_dist.numpy(), weights=lds_kernel_window, mode='constant')
+    
+    # Use re-weighting based on effective label distribution, sample-wise weights: [Ns,]
+    eff_num_per_label = [smoothed_value[bin_index] for bin_index in discrete_labels]
+    weights = [np.float32(1 / x) for x in eff_num_per_label]
+
+    # Scaling weights
+    scaling = len(weights) / np.sum(weights)
+    weights = [scaling * x for x in weights]
+    return torch.tensor(weights), emp_bins / emp_bins.max(), emp_label_dist / emp_label_dist.sum()

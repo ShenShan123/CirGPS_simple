@@ -106,9 +106,14 @@ class SealSramDataset(InMemoryDataset):
             self._data.node_attr[node_mask] /= max_node_feat
         
         ## normalize edge_label i.e., coupling capacitance
-        self._data.edge_label = torch.log10(self._data.edge_label * 1e21) / 6
+        self._data.edge_label = torch.log10(self._data.edge_label * 1e21) 
+        edge_label_c = self._data.edge_label.long().float()
+        self._data.edge_label /= 6
         self._data.edge_label[self._data.edge_label < 0] = 0.0
         self._data.edge_label[self._data.edge_label > 1] = 1.0
+        self._data.edge_label = torch.stack(
+            [self._data.edge_label, edge_label_c], dim=1
+        )
         self._data_list = None
 
     def set_cl_embeds(self, embeds):
