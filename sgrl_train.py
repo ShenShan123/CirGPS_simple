@@ -126,9 +126,10 @@ def sgrl_train(args, dataset, device):
     e2_lr = args.e2_lr
     weight_decay = args.weight_decay
     hidden_dim = args.cl_hid_dim
-    activation = torch.nn.PReLU()
-    num_layers = args.num_gnn_layers
+    activation = args.cl_act_fn
+    num_layers = args.cl_gnn_layers
     num_epochs = args.cl_epochs
+    dropout = args.cl_dropout
     momentum = args.momentum
     train_graph = adaption_for_sgrl(dataset)
     train_adj = adj_norm(train_graph)
@@ -137,14 +138,14 @@ def sgrl_train(args, dataset, device):
     num_hop = args.num_hops
     input_dim = train_graph.x.size(1)
     online_conv = CustomConv(
-        input_dim,hidden_dim,hidden_dim,activation,num_layers, 
-        # args.use_bn, args.dropout
+        args#.cl_model, input_dim,hidden_dim,hidden_dim,activation,num_layers, 
+        #drop_out=dropout,
     ).to(device)
     target_conv = CustomConv(
-        input_dim,hidden_dim,hidden_dim,activation,num_layers, 
-        # args.use_bn, args.dropout
+        args#.cl_model, input_dim,hidden_dim,hidden_dim,activation,num_layers, 
+        #drop_out=dropout,
     ).to(device)
-    
+
     # online_model = Online(online_conv,target_conv,hidden_dim,slsp_adj,num_hop,momentum).to(device)
     online_model = CustomOnline(online_conv,target_conv,hidden_dim,num_hop,momentum).to(device)
     target_model = Target(target_conv).to(device)
@@ -156,10 +157,10 @@ def sgrl_train(args, dataset, device):
     best_target_loss = 1e9
 
     #========== contrastive learning ==========#
-    batch_size=2048 #4096
+    batch_size=args.cl_batch_size #4096
     train_graph_loader = NeighborLoader(
         train_graph,
-        num_neighbors=[512,] * num_layers,
+        num_neighbors=[args.cl_num_neighbors,] * num_layers,
         batch_size=batch_size,
         shuffle=True,
         num_workers=args.num_workers,
@@ -180,8 +181,10 @@ def sgrl_train(args, dataset, device):
     best_epoch = 0
     cnt_wait = 0
 
-    model_name = f'pkl/pkl_online/best_online_{args.dataset}_layer{num_layers}'+ \
-        f'_dim{hidden_dim}_{activation.__class__.__name__}.pkl'
+    model_name = f"pkl/pkl_online/best_online_{args.dataset}_" + \
+        f"{args.cl_model}_layer{num_layers}_" + \
+        f"dim{hidden_dim}_{activation}_dr{dropout:.1f}_small.pkl" # small g SGRL
+  
 
     if not os.path.exists(model_name):
         print(f"Training SGRL model with name {model_name}...")
