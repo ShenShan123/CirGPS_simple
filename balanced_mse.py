@@ -147,7 +147,7 @@ class BMCLoss(_Loss):
 
 def bmc_loss(pred, target, noise_var):
     logits = - 0.5 * (pred - target).pow(2) / noise_var
-    loss = F.cross_entropy(logits, torch.arange(pred.shape[0], dtype=torch.float32, device=pred.device))
+    loss = F.cross_entropy(logits.view(-1), torch.arange(pred.shape[0], dtype=torch.float32, device=pred.device))
     loss = loss * (2 * noise_var).detach()
 
     return loss
@@ -237,3 +237,103 @@ def get_lds_weights(discrete_labels: torch.Tensor, lds_kernel: str, lds_ks: int,
     scaling = len(weights) / np.sum(weights)
     weights = [scaling * x for x in weights]
     return torch.tensor(weights), emp_bins / emp_bins.max(), emp_label_dist / emp_label_dist.sum()
+
+class BalancedSoftmax(_Loss):
+    """
+    Balanced Softmax Loss
+    """
+    def __init__(self, sample_per_class):
+
+        super(BalancedSoftmax, self).__init__()
+       
+        self.sample_per_class = sample_per_class
+    
+
+
+    def forward(self, input, label,  reduction='mean'):
+        return balanced_softmax_loss(logits=input, labels=label, sample_per_class=self.sample_per_class, reduction=reduction)
+    
+
+def balanced_softmax_loss(logits,labels, sample_per_class, reduction):
+    """Compute the Balanced Softmax Cross Entropy Loss between `logits` and the ground truth `labels`.
+    Args:
+      logits: A float tensor of size [batch, no_of_classes].
+      labels: A int tensor of size [batch].
+      sample_per_class: A int tensor or list of size [no of classes].
+      reduction: string. One of "none", "mean", "sum"
+    Returns:
+      loss: A float tensor. Balanced Softmax Loss.
+    """
+    if isinstance(sample_per_class, list):
+        sample_per_class = torch.tensor(sample_per_class).type_as(logits)
+    spc = sample_per_class.type_as(logits)
+    spc = spc.unsqueeze(0).expand(logits.shape[0], -1)
+    logits = logits + spc.log()
+    loss = F.cross_entropy(input=logits, target=labels, reduction=reduction)
+    return loss
+
+class FocalLoss(torch.nn.Module):
+    """
+    Focal Loss for Multi-Class Classification
+    Args:
+        gamma (float): focal parameter, control the weight of easy and hard samples, default 2.0
+        reduction (str): loss reduction, 'mean', 'sum'  or 'none'
+        class_weights (Tensor): weights for each class
+    """
+    def __init__(self, gamma=2.0, reduction='mean', class_weights=None):
+        super(FocalLoss, self).__init__()
+        self.gamma = gamma
+        self.reduction = reduction
+        self.class_weights = class_weights
+        
+    def forward(self, input, target):
+        """
+        Args:
+            input: model output logits, shape [N, C]
+            target: target class index, shape [N]
+        """
+        log_probs = F.log_softmax(input, dim=1)
+        probs = torch.exp(log_probs)
+        
+        target_probs = probs.gather(1, target.unsqueeze(1))
+        
+        focal_weight = (1 - target_probs) ** self.gamma
+        
+        if self.class_weights is not None:
+            alpha = self.class_weights.gather(0, target)
+            focal_weight = focal_weight * alpha.unsqueeze(1)
+        
+        loss = -focal_weight * log_probs.gather(1, target.unsqueeze(1))
+        
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        else:  # 'none'
+            return loss
+            
+def compute_class_weights(labels, num_classes):
+    """
+    
+    Args:
+        labels: class labels
+        num_classes: number of classes
+    
+    Returns:
+        class_weights: weights for each class
+    """
+    # calculate the number of samples for each class
+    counts = torch.zeros(num_classes, device=labels.device)
+    for i in range(num_classes):
+        counts[i] = (labels == i).sum().float()
+    
+    counts = counts.clamp(min=1.0)
+    
+    freqs = counts / counts.sum()
+
+    class_weights = 1.0 / freqs
+    
+    # normalize weights
+    class_weights = class_weights * (num_classes / class_weights.sum())
+    
+    return class_weights
