@@ -24,12 +24,20 @@ To use all features backed up by GraphGPS, please go to another [repository](htt
 ### Python environment setup with Conda
 In this simple version of cirgps, we employed `LinkNeighborLoader`, please see the [pyg doc](https://pytorch-geometric.readthedocs.io/en/2.5.1/modules/loader.html#torch_geometric.loader.LinkNeighborLoader) for more details.
 These codes are tested on our platform with 
-- torch==2.1.0+cu118
+- torch==2.2.0+cu118
 - torch-cluster==1.6.3
 - torch-geometric==2.6.1
 - torch-scatter==2.1.2
 - torch-sparse==0.6.18
 - torch-spline-conv==1.2.2
+
+# Create and activate a conda environment
+conda create -n dlpl python=3.10
+conda activate dlpl
+
+# Install dependencies
+pip install -r requirements.txt
+```
 
 ## 🚀 Usage
 
