@@ -35,6 +35,9 @@ bash
 # Create and activate a conda environment
 conda create -n yourname python=3.10
 conda activate yourname
+```
+bash
+```
 # Install dependencies
 pip install -r requirements.txt
 ```
