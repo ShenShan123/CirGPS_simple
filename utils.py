@@ -54,6 +54,10 @@ def get_pos_neg_edges(
             f"#neg={neg_edge_index[:, legal_mask].size(1)}")
         return g.tar_edge_index, neg_edge_index[:,legal_mask], neg_edge_type[legal_mask]
     
+    if neg_ratio==0.0:
+        return  torch.zeros(2, 0), torch.zeros(0) 
+    
+    
     neg_edge_index = []
     neg_edge_type  = []
     tar_edge_offset = 0
@@ -127,16 +131,20 @@ def get_balanced_edges(
         
         logging.info(f"Edge type {i}, balanced pos edge num: {pos_edge_type_list[-1].size(0)}")
 
-        # for neg edges
-        neg_edge_mask = (neg_edge_type - neg_edge_type.min()) == i
-        assert neg_edge_index.size(1) == neg_edge_type.size(0)
-        neg_edges = neg_edge_index[:, neg_edge_mask]
-        neg_etypes = neg_edge_type[neg_edge_mask]
-        indices = torch.randperm(neg_edges.size(1))[
-            :int(min_edge_num * neg_edge_ratio * sample_ratio), 
-        ]
-        neg_edge_index_list.append(neg_edges[:, indices])
-        neg_edge_type_list.append(neg_etypes[indices])
+        if neg_edge_ratio == 0.0:
+            neg_edge_index_list.append(torch.zeros(2, 0))
+            neg_edge_type_list.append(torch.zeros(0))
+        else:
+            # for neg edges
+            neg_edge_mask = (neg_edge_type - neg_edge_type.min()) == i
+            assert neg_edge_index.size(1) == neg_edge_type.size(0)
+            neg_edges = neg_edge_index[:, neg_edge_mask]
+            neg_etypes = neg_edge_type[neg_edge_mask]
+            indices = torch.randperm(neg_edges.size(1))[
+                :int(min_edge_num * neg_edge_ratio * sample_ratio), 
+            ]
+            neg_edge_index_list.append(neg_edges[:, indices])
+            neg_edge_type_list.append(neg_etypes[indices])
 
         logging.info(f"Edge type {i}, balanced neg edge num: {neg_edge_type_list[-1].size(0)}")
 
@@ -196,3 +204,36 @@ def collated_data_separate(data: Data, slices, idx: int=None):
         )
         data_list.append(copy.copy(separated_data))
     return data_list
+
+import torch
+
+def sanitize_batch_indices(batch_tensor: torch.Tensor, expected_len: int = None) -> torch.Tensor:
+    """
+    检查并修复 batch_tensor（例如 batch.batch）中的非法值：
+    - 确保是 int64 类型
+    - 确保全为非负整数
+    - 将 batch 编号重新编码为从 0 开始的连续整数
+    """
+    if expected_len is not None and batch_tensor.size(0) != expected_len:
+        raise ValueError(f"batch_tensor length {batch_tensor.size(0)} does not match expected {expected_len}")
+
+    if batch_tensor.dtype != torch.long:
+        print("[Warning] batch_tensor is not int64, casting to long.")
+        batch_tensor = batch_tensor.to(torch.long)
+
+    if (batch_tensor < 0).any():
+        min_val = batch_tensor.min().item()
+        raise ValueError(f"[Error] batch_tensor contains negative values: min={min_val}")
+
+    # 重新编号，使得 batch 从 0 开始连续编码（有些模型对此有要求）
+    unique_batches = batch_tensor.unique(sorted=True)
+    if not torch.equal(unique_batches, torch.arange(len(unique_batches), device=batch_tensor.device)):
+        print("[Info] Reindexing batch_tensor to consecutive values starting from 0.")
+        mapping = {old.item(): new for new, old in enumerate(unique_batches)}
+        batch_tensor = torch.tensor(
+            [mapping[b.item()] for b in batch_tensor.cpu()],
+            dtype=torch.long,
+            device=batch_tensor.device
+        )
+
+    return batch_tensor
