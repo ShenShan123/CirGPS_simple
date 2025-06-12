@@ -31,6 +31,33 @@ These codes are tested on our platform with
 - torch-sparse==0.6.18
 - torch-spline-conv==1.2.2
 
+## 🚀 Usage
+
+### Dataset Preparation
+
+#### Dataset Download Instructions
+
+The datasets used for training and testing CircuitGCL are available for download via the following links. You can use `curl` to directly download these files from the provided URLs.
+
+##### List of Datasets
+
+| Dataset Name    | Description                          | Download Link                                                                              |
+| --------------- | ------------------------------------ | ------------------------------------------------------------------------------------------ |
+| SSRAM           | Static Random Access Memory dataset  | [Download](https://circuitgcl-sram.s3.ap-southeast-2.amazonaws.com/raw/ssram.pt)           |
+| DIGITAL_CLK_GEN | Digital Clock Generator dataset      | [Download](https://circuitgcl-sram.s3.ap-southeast-2.amazonaws.com/raw/digtime.pt)         |
+| TIMING_CTRL     | Timing Control dataset               | [Download](https://circuitgcl-sram.s3.ap-southeast-2.amazonaws.com/raw/timing_ctrl.pt)     |
+| ARRAY_128_32    | Array with dimensions 128x32 dataset | [Download](https://circuitgcl-sram.s3.ap-southeast-2.amazonaws.com/raw/array_128_32_8t.pt) |
+| ULTRA8T         | Ultra 8 Transistor dataset           | [Download](https://circuitgcl-sram.s3.ap-southeast-2.amazonaws.com/raw/ultra8t.pt)         |
+| SANDWICH-RAM    | Sandwich RAM dataset                 | [Download](https://circuitgcl-sram.s3.ap-southeast-2.amazonaws.com/raw/sandwich.pt)        |
+| SP8192W         | Specialized 8192 Width dataset       | [Download](https://circuitgcl-sram.s3.ap-southeast-2.amazonaws.com/raw/sp8192w.pt)         |
+
+### Dataset path
+After downloading the above dataset, please add its path into the dataset_dir='' field in the main.py function.
+```bash
+
+dataset_dir=''
+```
+
 
 ### Running an experiment with CirGPS
 run the `main.py` for training & evaluation
