@@ -4,13 +4,16 @@ import torch.nn.functional as F
 import torch_geometric.nn as pygnn
 from torch_geometric.nn import (
     GCNConv, SAGEConv, GATConv, ResGatedGraphConv, 
-    GINConv, ChebConv, GINEConv, ClusterGCNConv, SSGConv
+    GINEConv, ClusterGCNConv
 )
 from torch_geometric.nn.models.mlp import MLP
+from torch_geometric.nn.aggr import AttentionalAggregation
+from gps_layer import GPSLayer
 
 NET = 0
 DEV = 1
 PIN = 2
+
 
 class GraphHead(nn.Module):
     """ GNN head for graph-level prediction.
@@ -29,25 +32,30 @@ class GraphHead(nn.Module):
     """
     def __init__(self, args):
         super().__init__()
-        self.use_cl = args.sgrl
-        self.use_pe = args.use_pe
+        self.use_cl = False
         self.use_stats = args.use_stats
         hidden_dim = args.hid_dim
         node_embed_dim = hidden_dim
-
-        if args.use_stats + self.use_pe + self.use_cl == 3:
-            assert hidden_dim % 4 == 0, \
-                "hidden_dim should be divided by 4 (4 types of encoders)"
-            node_embed_dim = hidden_dim // 4
+        self.task = args.task
+        self.task_level = args.task_level
+        self.net_only = args.net_only
+        self.num_classes = args.num_classes
+        self.class_boundaries = args.class_boundaries
+        local_gnn_type = args.local_gnn_type
+        global_model_type = args.global_model_type
+        act_fn = args.act_fn
+        attn_dropout = args.attn_dropout
+        use_bn = args.use_bn
+        num_heads = args.num_heads
         
         ## circuit statistics encoder + PE encoder + node&edge type encoders
-        elif args.use_stats + self.use_pe + self.use_cl == 2:
+        if args.use_stats + self.use_cl == 2:
             assert hidden_dim % 3 == 0, \
                 "hidden_dim should be divided by 3 (3 types of encoders)"
             node_embed_dim = hidden_dim // 3
 
         ## circuit statistics/pe encoder + node&edge type encoders
-        elif self.use_stats + self.use_pe + self.use_cl == 1:
+        elif self.use_stats + self.use_cl == 1:
             assert hidden_dim % 2 == 0, \
                 "hidden_dim should be divided by 2 (2 types of encoders)"
             node_embed_dim = hidden_dim // 2
@@ -68,14 +76,6 @@ class GraphHead(nn.Module):
             ## pin attributes are {0, 1, 2} for gate pin, source/drain pin, and base pin
             self.pin_attr_layers = nn.Embedding(17, node_embed_dim)
             self.c_embed_dim = node_embed_dim
-
-
-        ## PE encoder, producing D_0 and D_1
-        if self.use_pe:
-            assert node_embed_dim % 2 == 0, "node_embed_dim of self.pe_encoder should be even"
-            ## DSPD has 2 dimensions, distances to src and dst nodes
-            self.pe_encoder = nn.Embedding(num_embeddings=args.max_dist+1,
-                                           embedding_dim=node_embed_dim//2)
 
         ## Node / Edge type encoders.
         ## Node attributes are {0, 1, 2} for net, device, and pin
@@ -110,6 +110,15 @@ class GraphHead(nn.Module):
                     norm=None,
                 )
                 self.layers.append(GINEConv(mlp, train_eps=True, edge_dim=hidden_dim))
+            elif args.model == 'gps_attention':
+                self.layers.append(GPSLayer(hid_dim=hidden_dim, 
+                                            local_gnn_type=local_gnn_type,
+                                            global_model_type=global_model_type, 
+                                            act=act_fn, 
+                                            attn_dropout=attn_dropout, 
+                                            batch_norm=use_bn,
+                                            num_heads=num_heads
+                                            ))
             else:
                 raise ValueError(f'Unsupported GNN model: {args.model}')
         
@@ -118,12 +127,27 @@ class GraphHead(nn.Module):
         ## Add graph pooling layer
         if args.src_dst_agg == 'pooladd':
             self.pooling_fun = pygnn.pool.global_add_pool
+            
         elif args.src_dst_agg == 'poolmean':
             self.pooling_fun = pygnn.pool.global_mean_pool
-        
+            
+        elif args.src_dst_agg == 'globalattn':
+            self.attn_nn = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, 1)
+            )
+            self.pooling_fun = AttentionalAggregation(gate_nn=self.attn_nn)
         ## The head configuration
-        head_input_dim = hidden_dim * 2 if self.src_dst_agg == 'concat' else hidden_dim
-        dim_out = 1
+        head_input_dim = hidden_dim * 2 if self.src_dst_agg == 'concat'  and self.task_level == 'edge' else hidden_dim
+
+        if self.task == 'regression':
+            dim_out = 1
+        elif self.task =='classification':
+            dim_out = args.num_classes
+        else:
+            raise ValueError('Invalid task')
+        
         # head MLP layers
         self.head_layers = MLP(
             in_channels=head_input_dim, 
@@ -147,36 +171,34 @@ class GraphHead(nn.Module):
             self.activation = nn.ELU()
         elif args.act_fn == 'tanh':
             self.activation = nn.Tanh()
+        elif args.act_fn == 'leakyrelu':
+            self.activation = nn.LeakyReLU()
+        elif args.act_fn == 'prelu':
+            self.activation = nn.PReLU()
         else:
             raise ValueError('Invalid activation')
         
         ## Dropout setting
         self.drop_out = args.dropout
+        
+        if self.task_level == 'node' and args.src_dst_agg == 'globalattn':
+            print("[Warning] global attention is not typically used for node-level tasks.")
+
 
     def forward(self, batch):
         ## Node type / Edge type encoding
         x = self.node_encoder(batch.node_type)
         xe = self.edge_encoder(batch.edge_type)
-
+        # print("x", x.size()) #([30672, 72])
+        # print("edge_attr",xe.size()) #([61880, 144])
+        # assert 0
         ## Contrastive learning encoder
         if self.use_cl:
             xcl = self.cl_linear(batch.x)
             ## concatenate node embeddings and embeddings learned by SGRL
             x = torch.cat((x, xcl), dim=1)
 
-        ## DSPD encoding
-        if self.use_pe:
-            ## DSPD embeddings, D_0 and D_1 in EQ.1
-            dspd_emb = self.pe_encoder(batch.dspd)
-            if dspd_emb.ndim == 3 and dspd_emb.size(1) == 2:
-                dspd_emb = torch.cat((dspd_emb[:, 0, :], dspd_emb[:, 1, :]), dim=1)
-            else:
-                raise ValueError(
-                    f"Dimension number of DSPD embedding is" + 
-                    f" {dspd_emb.ndim}, size {dspd_emb.size()}")
-            ## concatenate node embeddings and DSPD embeddings
-            x = torch.cat((x, dspd_emb), dim=1)
-
+        
         ## If we use circuit statistics encoder
         if self.use_stats:
             net_node_mask = batch.node_type == NET
@@ -195,37 +217,68 @@ class GraphHead(nn.Module):
             ## concatenate node embeddings and circuit statistics embeddings (C in EQ.6)
             x = torch.cat((x, node_attr_emb), dim=1)
 
-        for conv in self.layers:
-            ## for models that also take edge_attr as input
-            if self.model == 'gine' or self.model == 'resgatedgcn':
-                x = conv(x, batch.edge_index, edge_attr=xe)
-            else:
-                x = conv(x, batch.edge_index)
-
-            if self.use_bn:
-                x = self.bn_node_x(x)
-            
-            x = self.activation(x)
-
-            if self.drop_out > 0.0:
-                x = F.dropout(x, p=self.drop_out, training=self.training)
-
-        ## In head layers. If we use graph pooling, we need to call the pooling function here
-        if self.src_dst_agg[:4] == 'pool':
-            graph_emb = self.pooling_fun(x, batch.batch)
-        ## Otherwise, only 2 embeddings from the anchor nodes are used to final prediction.
+        # GNN layers
+        if self.model == 'gps_attention':
+            batch.x = x
+            batch.edge_attr = xe
+            # print("x", x.size()) #([30672, 72]) 
+            # print("edge_attr",batch.edge_attr.size()) #([61880, 144])
+            # assert 0
+            for layer in self.layers:
+                batch = layer(batch)  # GPSLayer 接收整个 batch
+            x = batch.x  # 最后提取节点特征
         else:
-            batch_size = batch.edge_label.size(0)
-            ## In the LinkNeighbor loader, the first batch_size nodes in x are source nodes and,
-            ## the second 'batch_size' nodes in x are destination nodes. 
-            ## Remaining nodes are their '1-hop', '2-hop', 'n-hop' neighbors.
-            src_emb = x[:batch_size, :]
-            dst_emb = x[batch_size:batch_size*2, :]
-            if self.src_dst_agg == 'concat':
-                graph_emb = torch.cat((src_emb, dst_emb), dim=1)
+            x = batch.x
+            for conv in self.layers:
+                if self.model == 'gine' or self.model == 'resgatedgcn':
+                    x = conv(x, batch.edge_index, edge_attr=xe)
+                else:
+                    x = conv(x, batch.edge_index)
+
+                if self.use_bn:
+                    x = self.bn_node_x(x)
+                x = self.activation(x)
+
+                if self.drop_out > 0.0:
+                    x = F.dropout(x, p=self.drop_out, training=self.training)
+
+            batch.x = x  # 如果后面还要用 batch
+
+
+        ## task level : node
+        if self.task_level == 'node':
+            if self.net_only:
+                net_node_mask = batch.node_type == NET
+                pred = self.head_layers(x[net_node_mask])
+                true_class = batch.y[:, 1][net_node_mask].long()
+                true_label = batch.y[net_node_mask]
             else:
-                graph_emb = src_emb + dst_emb
+                pred = self.head_layers(x)
+                true_class = batch.y[:, 1].long()
+                true_label = batch.y
 
-        pred = self.head_layers(graph_emb)
+        elif self.task_level == 'edge':
+            if self.src_dst_agg in ['pooladd', 'poolmean', 'globalattn']:
+                graph_emb = self.pooling_fun(x, batch.batch)
+            else:
+                batch_size = batch.edge_label.size(0)
+                src_emb = x[:batch_size, :]
+                dst_emb = x[batch_size:batch_size*2, :]
+                if self.src_dst_agg == 'concat':
+                    graph_emb = torch.cat((src_emb, dst_emb), dim=1)
+                else:
+                    graph_emb = src_emb + dst_emb
 
-        return pred, batch.edge_label
+
+            pred = self.head_layers(graph_emb)
+            true_class = batch.edge_label[:, 1].long()
+            true_label = batch.edge_label
+        
+        else:
+            raise ValueError('Invalid task level')
+            
+        return pred,true_class,true_label
+        
+        
+    
+
