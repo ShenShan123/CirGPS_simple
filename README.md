@@ -30,11 +30,11 @@ These codes are tested on our platform with
 - torch-scatter==2.1.2
 - torch-sparse==0.6.18
 - torch-spline-conv==1.2.2
-
+bash
+```
 # Create and activate a conda environment
-conda create -n dlpl python=3.10
-conda activate dlpl
-
+conda create -n yourname python=3.10
+conda activate yourname
 # Install dependencies
 pip install -r requirements.txt
 ```
