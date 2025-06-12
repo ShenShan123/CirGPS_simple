@@ -12,33 +12,37 @@ from utils import (
     collated_data_separate)
 from torch.utils.data import Dataset
 from torch_geometric.data import Batch
+from torch_geometric.utils import subgraph
 
 class SealSramDataset(InMemoryDataset):
     def __init__(
         self,
         name, #add
         root, #add
-        add_target_edges=False,
         neg_edge_ratio=1.0,
         to_undirected=True,
-        sample_rates=[1.0],
-        task_type='classification',
+        sample_rates=[1.0], 
+        task_level='edge',
+        net_only=True,
         transform=None, 
-        pre_transform=None
+        pre_transform=None,
+        class_boundaries=[0.2, 0.4, 0.6, 0.8]
     ) -> None:
         """ The SRAM dataset. 
         It can be a combination of several large circuit graphs or millions of sampled subgraphs.
         Args:
             name (str): The name of the dataset.
             root (str): The root directory of the dataset.
-            add_target_edges (bool): Whether to add target (labeled) edges to the graph.
             neg_edge_ratio (float): The ratio of negative edges to positive edges.
             to_undirected (bool): Whether to convert the graph to an undirected graph.
             sample_rates (list): The sampling rates of target edges for each dataset.
             task_type (str): The task type. It can be 'classification', 'regression', 'node_classification', 'node_regression'.
+            num_classes (int): The number of classes.
+            class_boundaries (list): The boundaries of the classes.
         """
         self.name = 'sram'
-
+        self.class_boundaries = torch.tensor(class_boundaries)
+        print("self.class_boundaries", self.class_boundaries)
         ## split the dataset according to '+' in the name
         if '+' in name:
             self.names = name.split('+')
@@ -52,7 +56,6 @@ class SealSramDataset(InMemoryDataset):
             f"len of dataset:{len(self.names)}, len of sample_rate: {len(self.sample_rates)}"
         
         self.folder = os.path.join(root, self.name)
-        self.add_target_edges = add_target_edges
         self.neg_edge_ratio = neg_edge_ratio
         self.to_undirected = to_undirected
         ## data_lengths can be the number of total datasets or the number of subgraphs
@@ -60,10 +63,12 @@ class SealSramDataset(InMemoryDataset):
         ## offset index for each graph
         self.data_offsets = {}
 
-        self.task_type = task_type
-        self.max_net_node_feat = torch.ones((1, 17))
+        self.task_level = task_level
+        self.net_only = net_only
+    
+        self.max_net_node_feat = torch.ones((1, 17)) # the max feature dimension of net and dev nodes
         self.max_dev_node_feat = torch.ones((1, 17))
-        
+
         super().__init__(self.folder, transform, pre_transform)
         data_list = []
 
@@ -74,7 +79,13 @@ class SealSramDataset(InMemoryDataset):
             # print("loaded_slices", loaded_slices)
 
             self.data_offsets[name] = len(data_list)
-            self.data_lengths[name] = loaded_data.edge_label.size(0)
+            if self.task_level == 'node':
+                self.data_lengths[name] = loaded_data.y.size(0)
+            elif self.task_level == 'edge':
+                self.data_lengths[name] = loaded_data.edge_label.size(0)
+            else:
+                raise ValueError(f"Invalid task level: {self.task_level}")
+
             if loaded_slices is not None:
                 data_list += collated_data_separate(loaded_data, loaded_slices)#[:data_len]
             else:
@@ -89,7 +100,7 @@ class SealSramDataset(InMemoryDataset):
 
     def norm_nfeat(self, ntypes):
         """
-        This is only used in regression task. Only `DEVICE` and `NET` nodes have circuit statistics.
+         Only `DEVICE` and `NET` nodes have circuit statistics.
         Args:
             ntypes (list): The node types {0, 1} to be normalized
         """
@@ -97,6 +108,8 @@ class SealSramDataset(InMemoryDataset):
             self.data, self.slices = self.collate(self._data_list)
             self._data_list = None
 
+
+        # normalize the node features
         for ntype in ntypes:
             node_mask = self._data.node_type == ntype
             max_node_feat, _ = self._data.node_attr[node_mask].max(dim=0, keepdim=True)
@@ -104,17 +117,35 @@ class SealSramDataset(InMemoryDataset):
 
             print(f"normalizing node_attr {ntype}: {max_node_feat} ...")
             self._data.node_attr[node_mask] /= max_node_feat
-        
-        ## normalize edge_label i.e., coupling capacitance
-        self._data.edge_label = torch.log10(self._data.edge_label * 1e21) 
-        edge_label_c = self._data.edge_label.long().float()
-        self._data.edge_label /= 6
-        self._data.edge_label[self._data.edge_label < 0] = 0.0
-        self._data.edge_label[self._data.edge_label > 1] = 1.0
-        self._data.edge_label = torch.stack(
-            [self._data.edge_label, edge_label_c], dim=1
-        )
-        self._data_list = None
+
+        if self.task_level == 'edge':
+            ## normalize edge_label i.e., coupling capacitance
+            self._data.edge_label = torch.log10(self._data.edge_label * 1e21) 
+            self._data.edge_label /= 6
+            self._data.edge_label[self._data.edge_label < 0] = 0.0
+            self._data.edge_label[self._data.edge_label > 1] = 1.0
+            edge_label_c = torch.bucketize(self._data.edge_label, self.class_boundaries)
+            self._data.edge_label = torch.stack(
+                [self._data.edge_label, edge_label_c], dim=1
+            )
+            self._data_list = None
+          
+
+
+        elif self.task_level == 'node':
+            ## normalize the node label i.e., lumped ground capacitance
+            self._data.y = torch.log10(self._data.y * 1e20) / 6
+            self._data.y[self._data.y < 0] = 0.0
+            self._data.y[self._data.y > 1] = 1.0
+            node_label_c = torch.bucketize(self._data.y, self.class_boundaries)
+            self._data.y = torch.stack(
+                [self._data.y, node_label_c], dim=1
+            )
+            print("self._data.y", self._data.y)
+            self._data_list = None
+
+       
+           
 
     def set_cl_embeds(self, embeds):
         """
@@ -135,7 +166,7 @@ class SealSramDataset(InMemoryDataset):
     def sram_graph_load(self, name, raw_path):
         """
         In the loaded circuit graph, ground capacitance values are stored in "tar_node_y' attribute of the node. 
-        There are to edge sets. 
+        There are two edge sets. 
         The first is the connections existing in circuit topology, attribute names start with "edge". 
         For example, "g.edge_index" and "g.edge_type".
         The second is edges to be predicted, which are parasitic coupling edges. Their attribute names start with "tar_edge". 
@@ -204,10 +235,10 @@ class SealSramDataset(InMemoryDataset):
         tar_node_y = []
         g._n2type = {}
         node_feat = []
-        max_feat_dim = 17
-        ## padding y for device nodes (only net and pin nodes has capacitance)
-        hg['device'].y = torch.ones((hg['device'].x.shape[0], 1)) * 1e-30
-        
+        max_feat_dim = 17 # the max feature dimension of nodes
+
+        hg['device'].y = torch.ones((hg['device'].x.shape[0], 1)) * 1e-30   # 1e-30 is the minimum ground capacitance value
+
         for n, ntype in enumerate(hg.node_types):
             g._n2type[ntype] = n
             feat = hg[ntype].x
@@ -220,10 +251,20 @@ class SealSramDataset(InMemoryDataset):
         g.x = g.node_type.view(-1, 1)
         ## circuit statistic features
         g.node_attr = torch.cat(node_feat, dim=0)
-        ## lumped ground capacitance on net/pin nodes
-        g.tar_node_y = torch.cat(tar_node_y, dim=0)
 
-        del g.y
+        if self.task_level == 'node' :
+            if self.net_only:
+                net_mask = g.node_type == g._n2type['net'] 
+                g.tar_node_y = torch.zeros((g.num_nodes, 1)) 
+                net_nodes = torch.where(net_mask)[0]
+                g.tar_node_y[net_nodes] = hg['net'].y  # assign the ground capacitance value to the net nodes
+            else:
+                ## lumped ground capacitance on net/pin nodes
+                g.tar_node_y = torch.cat(tar_node_y, dim=0)
+            g.y = g.tar_node_y
+        
+
+       
         g._e2type = {}
 
         for e, (edge, store) in enumerate(hg.edge_items()):
@@ -271,31 +312,27 @@ class SealSramDataset(InMemoryDataset):
         ## remove target edges from the original g
         g.edge_type = g.edge_type[0:edge_offset]
         g.edge_index = g.edge_index[:, 0:edge_offset]
+        
 
         ## convert to undirected edges
         if self.to_undirected:
-            g.edge_index, g.edge_type = to_undirected(
-                g.edge_index, g.edge_type, g.num_nodes, reduce='mean'
-            )
+                g.edge_index, g.edge_type = to_undirected(
+                    g.edge_index, g.edge_type, g.num_nodes, reduce='mean'
+                )
         
         return g
 
     def single_g_process(self, idx: int):
-        logging.info(f"processing dataset {self.names[idx]} "+ 
+        print(f"processing dataset {self.names[idx]} "+ 
                      f"with sample_rate {self.sample_rates[idx]}...")
         ## we can load multiple graphs
         graph = self.sram_graph_load(self.names[idx], self.raw_paths[idx])
-        logging.info(f"loaded graph {graph}")
+        print(f"loaded graph {graph}")
         
         ## generate negative edges for the loaded graph
         neg_edge_index, neg_edge_type = get_pos_neg_edges(
             graph, neg_ratio=self.neg_edge_ratio)
         
-        if self.add_target_edges:
-            ## self.data is actually the augmented graph
-            aug_graph = add_tar_edges_to_g(graph, neg_edge_index, neg_edge_type)
-        else:
-            aug_graph = graph
         
         ## sample a portion of pos/neg edges
         (
@@ -306,32 +343,36 @@ class SealSramDataset(InMemoryDataset):
             self.neg_edge_ratio, self.sample_rates[idx]
         )
 
-        ## Now we deal with the edge-level task
-        if self.task_type == 'classification':
-            links = torch.cat([pos_edge_index, neg_edge_index], 1)  # [2, Np + Nn]
-            labels = torch.tensor(
-                [1]*pos_edge_index.size(1) + [0]*neg_edge_index.size(1), dtype=torch.long
-            )
-        elif self.task_type == 'regression':
+
+        if self.task_level == 'edge' :
             ## We only consider the positive edges in the regression task.
             links = pos_edge_index  # [2, Np]
             labels = pos_edge_y
+        elif self.task_level == 'node':
+            # node classification
+            graph.y = graph.tar_node_y.squeeze()  # assume shape is [num_nodes]
         else:
-            raise ValueError(f"No defination of task {self.task_type} in this version!")
+            raise ValueError(f"No defination of task {self.task_level} in this version!")
         
         ## remove the redundant attributes in this version
-        del aug_graph.tar_node_y
-        del aug_graph.tar_edge_index
-        del aug_graph.tar_edge_type
-        del aug_graph.tar_edge_y
+        del graph.tar_node_y
+        del graph.tar_edge_index
+        del graph.tar_edge_type
+        del graph.tar_edge_y
 
-        ## To use LinkNeighborLoader, the target links rename to edge_label_index
-        ## target edge labels rename to edge_label
-        aug_graph.edge_label_index = links
-        aug_graph.edge_label = labels
-
-        torch.save((aug_graph, None), self.processed_paths[idx])
-        return aug_graph.edge_label.size(0)
+        
+        if self.task_level == 'node':
+            torch.save((graph, None), self.processed_paths[idx])
+            return graph.y.size(0)
+        elif self.task_level == 'edge':
+            ## To use LinkNeighborLoader, the target links rename to edge_label_index
+            ## target edge labels rename to edge_label
+            graph.edge_label_index = links
+            graph.edge_label = labels
+            torch.save((graph, None), self.processed_paths[idx])
+            return graph.edge_label.size(0)
+        else:
+            raise ValueError(f"No defination of task {self.task_type} in this version!")
 
     def process(self):
         data_lens_for_split = []
@@ -357,15 +398,12 @@ class SealSramDataset(InMemoryDataset):
     
     @property
     def processed_dir(self) -> str:
-        if self.task_type == 'regression' or \
-            self.task_type == 'classification':
-            return os.path.join(self.root, 'processed', self.task_type)
-        elif self.task_type == 'node_regression':
+        if self.task_level == 'edge':
+            return os.path.join(self.root, 'processed_for_edges')
+        elif self.task_level == 'node':
             return os.path.join(self.root, 'processed_for_nodes')
-        elif self.task_type == 'node_classification':
-            return os.path.join(self.root, 'processed_for_nodes/hop2_w_zero')
         else:
-            raise ValueError(f"No defination of task {self.task_type}!")
+            raise ValueError(f"No defination of task {self.task_level}!")
 
     @property
     def processed_file_names(self):
@@ -373,63 +411,11 @@ class SealSramDataset(InMemoryDataset):
         for i, name in enumerate(self.names):
             if self.sample_rates[i] < 1.0:
                 name += f"_s{self.sample_rates[i]}"
-            if self.add_target_edges:
-                name += "_aug"
 
             if self.neg_edge_ratio < 1.0:
                 name += f"_nr{self.neg_edge_ratio:.1f}"
             processed_names.append(name+"_processed.pt")
         return processed_names
-
-class LinkPredictionDataset(Dataset):
-    """This is self implemented dataset for link prediction task.
-    No use in this version.
-    """
-    def __init__(self, node_embeddings, graph, test=False):
-        assert node_embeddings.size(0) == graph.num_nodes
-        # links size is [2, num_links]
-        self.len = graph.edge_label_index.size(1)
-        self.x_data = node_embeddings
-        self.y_data = graph.edge_label.long()
-        self.links = graph.edge_label_index
-        if test:
-            self.test_idx = np.arange(self.len)
-        else:
-            self.train_idx, self.val_idx = self.get_idx_split()
-
-    def __getitem__(self, index):
-        # links size is [2, num_links]
-        src = self.links[0, index]
-        dst = self.links[1, index]
-        y = self.y_data[index]
-        return self.x_data[src], self.x_data[dst], y
-
-    def __len__(self):
-        return self.len
-    
-    def get_idx_split(self):
-        return train_test_split(
-            np.arange(self.len), 
-            test_size=0.2, 
-            random_state=123, 
-            shuffle=True,
-            #stratify=stratify,
-        )
-    
-def collate_fn(dataList):
-    """ It is only used by self implemented 'LinkPredictionDataset'.
-    """
-    num_items = len(dataList)
-    dim = dataList[0][0].size(-1)
-    src_data = torch.zeros((num_items, dim), dtype=torch.float32)
-    dst_data = torch.zeros((num_items, dim), dtype=torch.float32)
-    y = torch.zeros((num_items), dtype=torch.long)
-    for i in range(num_items):
-        src_data[i], dst_data[i], y[i] = dataList[i]
-    batch = Data()
-    batch.x = torch.stack([src_data, dst_data], dim=0)
-    batch.y = y
-    return batch
 
 def adaption_for_sgrl(dataset):
     """
@@ -439,9 +425,11 @@ def adaption_for_sgrl(dataset):
 
     for i, name in enumerate(dataset.names):
         single_graph = Data(
-            x=dataset[i].node_type, edge_index=dataset[i].edge_index, 
+            x=dataset[i].node_type, 
+            edge_index=dataset[i].edge_index, 
             edge_attr=dataset[i].edge_type
         )
+        single_graph.node_attr = dataset[i].node_attr
         data_list.append(single_graph)
 
     # Create a big graph concate all graphs from the `data_list`
@@ -461,20 +449,28 @@ def adaption_for_sgrl(dataset):
     return batch
 
 def performat_SramDataset(dataset_dir, name, 
-                          add_target_edges, 
                           neg_edge_ratio, to_undirected, 
-                          sample_rates, task_type):
+                          small_dataset_sample_rates, large_dataset_sample_rates,
+                          task_level,
+                          net_only,
+                          class_boundaries
+                          ):
     start = time.perf_counter()
-    num_datasets = len(name.split('+'))
+    names = name.split('+')
+    sr_list = [
+        large_dataset_sample_rates if gname == 'ultra8t' or gname == 'sandwich' else small_dataset_sample_rates 
+        for gname in names
+    ]
 
     dataset = SealSramDataset(
-        name=name, root=dataset_dir,
-        add_target_edges=add_target_edges,
-        neg_edge_ratio=neg_edge_ratio,
-        to_undirected=to_undirected,
-        sample_rates=[sample_rates] * num_datasets,
-        task_type=task_type,
-    )
+            name=name, root=dataset_dir,
+            neg_edge_ratio=neg_edge_ratio,
+            to_undirected=to_undirected,
+            sample_rates=sr_list,
+            task_level=task_level,              
+            net_only=net_only,
+            class_boundaries=class_boundaries
+        )
 
     elapsed = time.perf_counter() - start
     timestr = time.strftime('%H:%M:%S', time.gmtime(elapsed)) \
